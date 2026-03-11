@@ -1,37 +1,71 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <time.h>
 
-// Function to get the 1D index from 3D coordinates
-int get_index(int x, int y, int z, int size) {
-    return (x * size * size) + (y * size) + z;
+/* ------------------------------------------------------------------ */
+/*  Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+/* 3-D → 1-D index (row-major: x varies slowest, z fastest) */
+static inline int idx(int x, int y, int z, int ssq, int s) {
+    return x * ssq + y * s + z;
 }
 
-// Function to count living neighbors using a wrapping (toroidal) boundary
-int count_neighbors(int *grid, int size, int x, int y, int z) {
-    int count = 0;
+/* Count 26 neighbours – INTERIOR cell (no coordinate wraps needed) */
+static inline int count_interior(const unsigned char *restrict g,
+                                 int x, int y, int z,
+                                 int ssq, int s) {
+    int c = 0;
     for (int dx = -1; dx <= 1; dx++) {
+        int bx = (x + dx) * ssq;
         for (int dy = -1; dy <= 1; dy++) {
+            int bxy = bx + (y + dy) * s;
             for (int dz = -1; dz <= 1; dz++) {
                 if (dx == 0 && dy == 0 && dz == 0) continue;
-
-                // Use modulo to wrap around the edges safely
-                int nx = (x + dx + size) % size;
-                int ny = (y + dy + size) % size;
-                int nz = (z + dz + size) % size;
-
-                count += grid[get_index(nx, ny, nz, size)];
+                c += g[bxy + (z + dz)];
             }
         }
     }
-    return count;
+    return c;
 }
 
-int main(int argc, char *argv[]) {
-    int size = 30;        // Default grid size
-    int generations = 20; // Default number of generations
-    int seed = 42;        // Default deterministic seed
+/* Count 26 neighbours – BOUNDARY cell (toroidal / wrapping) */
+static inline int count_boundary(const unsigned char *restrict g,
+                                 int x, int y, int z,
+                                 int ssq, int s) {
+    int c = 0;
+    for (int dx = -1; dx <= 1; dx++) {
+        int bx = ((x + dx + s) % s) * ssq;
+        for (int dy = -1; dy <= 1; dy++) {
+            int bxy = bx + ((y + dy + s) % s) * s;
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dy == 0 && dz == 0) continue;
+                c += g[bxy + ((z + dz + s) % s)];
+            }
+        }
+    }
+    return c;
+}
 
-    // Check for grid size argument
+/* Rule 4555: survive on 4 or 5 neighbours, birth on exactly 5 */
+static inline unsigned char apply_rule(unsigned char alive, int nbrs) {
+    if (alive)
+        return (nbrs == 4 || nbrs == 5) ? 1 : 0;
+    else
+        return (nbrs == 5) ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Main                                                               */
+/* ------------------------------------------------------------------ */
+
+int main(int argc, char *argv[]) {
+    int size        = 30;   /* default grid size        */
+    int generations = 20;   /* default generation count */
+    int seed        = 42;   /* default RNG seed         */
+
+    /* Parse CLI arguments: size generations seed */
     if (argc > 1) {
         size = atoi(argv[1]);
         if (size < 5) {
@@ -39,8 +73,6 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     }
-
-    // Check for generation count argument
     if (argc > 2) {
         generations = atoi(argv[2]);
         if (generations < 1) {
@@ -48,86 +80,99 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     }
-
-    // Check for seed argument
     if (argc > 3) {
         seed = atoi(argv[3]);
     }
 
-    printf("Initializing a %dx%dx%d universe for %d generations (Seed: %d)...\n", size, size, size, generations, seed);
+    printf("Initializing a %dx%dx%d universe for %d generations (Seed: %d)...\n",
+           size, size, size, generations, seed);
 
-    // Dynamically allocate memory for the grids using calloc (initializes to 0)
-    int total_cells = size * size * size;
-    int *grid = (int *)calloc(total_cells, sizeof(int));
-    int *next_grid = (int *)calloc(total_cells, sizeof(int));
+    const int total_cells  = size * size * size;
+    const int size_squared = size * size;   /* precomputed size^2 */
 
-    if (grid == NULL || next_grid == NULL) {
+    /*
+     * Allocate grids as unsigned char (1 byte per cell) instead of int
+     * (4 bytes).  For a 100³ grid this is 1 MB vs. 4 MB — a big win for
+     * cache-line utilisation.
+     */
+    unsigned char *grid      = calloc(total_cells, 1);
+    unsigned char *next_grid = calloc(total_cells, 1);
+    if (!grid || !next_grid) {
         printf("Memory allocation failed! Grid size might be too large.\n");
         return 1;
     }
 
+    /* Open output file with a large buffer to cut down on write syscalls */
     FILE *file = fopen("evolution.txt", "w");
-    if (file == NULL) {
+    if (!file) {
         printf("Error opening file!\n");
         free(grid);
         free(next_grid);
         return 1;
     }
+    setvbuf(file, NULL, _IOFBF, 1 << 20);  /* 1 MiB write buffer */
 
-    // Initialize a random "primordial soup" deterministically
+    /* Seed the "primordial soup" deterministically */
     srand((unsigned int)seed);
-    int center = size / 2;
-    for (int i = center - 3; i <= center + 3; i++) {
-        for (int j = center - 3; j <= center + 3; j++) {
-            for (int k = center - 3; k <= center + 3; k++) {
-                grid[get_index(i, j, k, size)] = rand() % 2;
-            }
-        }
-    }
+    int cen = size / 2;
+    for (int i = cen - 3; i <= cen + 3; i++)
+        for (int j = cen - 3; j <= cen + 3; j++)
+            for (int k = cen - 3; k <= cen + 3; k++)
+                grid[idx(i, j, k, size_squared, size)] = (unsigned char)(rand() % 2);
 
-    // Run the simulation
+    clock_t t0 = clock();
+
+    /* ============================================================== */
+    /*  Simulation loop                                                */
+    /* ============================================================== */
     for (int gen = 0; gen < generations; gen++) {
+
+        /* --- 1. Log living cells ----------------------------------- */
         fprintf(file, "=== Generation %d ===\n", gen);
-
-        for (int x = 0; x < size; x++) {
-            for (int y = 0; y < size; y++) {
-                for (int z = 0; z < size; z++) {
-
-                    int current_idx = get_index(x, y, z, size);
-
-                    // Log living cells
-                    if (grid[current_idx] == 1) {
-                        fprintf(file, "(%d, %d, %d)\n", x, y, z);
-                    }
-
-                    // Apply Rule 4555
-                    int neighbors = count_neighbors(grid, size, x, y, z);
-
-                    if (grid[current_idx] == 1) {
-                        if (neighbors == 4 || neighbors == 5) {
-                            next_grid[current_idx] = 1;
-                        }
-                    } else {
-                        if (neighbors == 5) {
-                            next_grid[current_idx] = 1;
-                        }
-                    }
-                }
+        for (int i = 0; i < total_cells; i++) {
+            if (grid[i]) {
+                int x = i / size_squared;
+                int r = i % size_squared;
+                fprintf(file, "(%d, %d, %d)\n", x, r / size, r % size);
             }
         }
 
-        // Copy next_grid to grid and clear next_grid for the next loop
+        /* --- 2. Evolve -------------------------------------------- */
+        /*
+         * Interior cells (all coords strictly inside [1 .. size-2]) use
+         * the fast, modulo-free neighbour count; boundary cells fall back
+         * to the wrapping version.
+         */
         for (int i = 0; i < total_cells; i++) {
-            grid[i] = next_grid[i];
-            next_grid[i] = 0;
+            int x = i / size_squared;
+            int r = i % size_squared;
+            int y = r / size;
+            int z = r % size;
+
+            int nbrs;
+            if (x > 0 && x < size - 1 &&
+                y > 0 && y < size - 1 &&
+                z > 0 && z < size - 1)
+                nbrs = count_interior(grid, x, y, z, size_squared, size);
+            else
+                nbrs = count_boundary(grid, x, y, z, size_squared, size);
+
+            next_grid[i] = apply_rule(grid[i], nbrs);
         }
+
+        /* --- 3. Pointer swap (O(1)) + clear next buffer ------------ */
+        unsigned char *tmp = grid;
+        grid      = next_grid;
+        next_grid = tmp;
+        memset(next_grid, 0, (size_t)total_cells);  /* fast library memset */
 
         fprintf(file, "\n");
     }
 
-    fclose(file);
+    double elapsed = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    printf("Simulation time: %.4f s\n", elapsed);
 
-    // Free the dynamically allocated memory
+    fclose(file);
     free(grid);
     free(next_grid);
 
