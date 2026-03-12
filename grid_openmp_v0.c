@@ -75,12 +75,11 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Initialize a random "primordial soup" deterministically
+    // Initialize a random "primordial soup" over the entire N³ universe
     srand((unsigned int)seed);
-    int center = size / 2;
-    for (int i = center - 3; i <= center + 3; i++) {
-        for (int j = center - 3; j <= center + 3; j++) {
-            for (int k = center - 3; k <= center + 3; k++) {
+    for (int i = 0; i < size; i++) {
+        for (int j = 0; j < size; j++) {
+            for (int k = 0; k < size; k++) {
                 grid[get_index(i, j, k, size)] = rand() % 2;
             }
         }

@@ -193,15 +193,14 @@ int main(int argc, char *argv[]) {
     printf("Initializing a %dx%dx%d universe for %d generations (Seed: %d)...\n",
            size, size, size, generations, seed);
 
-    /* --- Build initial living-cell list (same RNG sequence as grid_sequential) --- */
+    /* --- Build initial living-cell list over the ENTIRE N³ universe --- */
     CoordList living;
-    cl_init(&living, 1024);
+    cl_init(&living, size * size * size / 2);
 
     srand((unsigned int)seed);
-    int cen = size / 2;
-    for (int i = cen - 3; i <= cen + 3; i++)
-        for (int j = cen - 3; j <= cen + 3; j++)
-            for (int k = cen - 3; k <= cen + 3; k++)
+    for (int i = 0; i < size; i++)
+        for (int j = 0; j < size; j++)
+            for (int k = 0; k < size; k++)
                 if (rand() % 2)
                     cl_push(&living, i, j, k);
 

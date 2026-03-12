@@ -128,12 +128,11 @@ int main(int argc, char *argv[]) {
     if (!file) { puts("Error opening file!"); free(grid); free(next_grid); return 1; }
     setvbuf(file, NULL, _IOFBF, 1 << 20);      /* 1 MiB write buffer */
 
-    /* Seed the "primordial soup" deterministically */
+    /* Seed the "primordial soup" over the entire N³ universe */
     srand((unsigned int)seed);
-    int cen = size / 2;
-    for (int i = cen - 3; i <= cen + 3; i++)
-        for (int j = cen - 3; j <= cen + 3; j++)
-            for (int k = cen - 3; k <= cen + 3; k++)
+    for (int i = 0; i < size; i++)
+        for (int j = 0; j < size; j++)
+            for (int k = 0; k < size; k++)
                 grid[idx(i, j, k, size_squared, size)] = (unsigned char)(rand() % 2);
 
     double t0 = omp_get_wtime();
