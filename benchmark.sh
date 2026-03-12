@@ -2,7 +2,7 @@
 
 # Configuration
 EXE="./ao2"
-SIZE=300
+SIZE=100
 GENS=20
 SEED=42
 OUTPUT_CSV="benchmarks.csv"
