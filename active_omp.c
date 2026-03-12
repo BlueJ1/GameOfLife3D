@@ -265,8 +265,8 @@ int main(int argc, char *argv[]) {
                 living     = new_living;
                 new_living = tmp;
 
-                if (gen % 5 == 0 || gen == generations - 1)
-                    printf("  gen %4d : %d live cells\n", gen, living.count);
+                //if (gen % 5 == 0 || gen == generations - 1)
+                //    printf("  gen %4d : %d live cells\n", gen, living.count);
             }
             /* implicit barrier — new living visible to all */
         }

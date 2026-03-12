@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Configuration
-EXE="./ao2"
-SIZE=100
+EXE="./ao"
+SIZE=200
 GENS=20
 SEED=42
 OUTPUT_CSV="benchmarks.csv"
@@ -19,7 +19,7 @@ echo "threads,runtime_sec" > "$OUTPUT_CSV"
 echo "Starting benchmarks for cores 1 to 40..."
 echo "---------------------------------------"
 
-for cores in {1..40}
+for cores in {1..16}
 do
     # Run the command and capture the output
     # We use 'tail -n 2' and 'head -n 1' to grab the specific line containing the time

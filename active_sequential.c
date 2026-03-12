@@ -1,23 +1,32 @@
 /*
- * 3-D Game of Life 4555 — Active-cell (hash-table) sequential version
+ * 3-D Game of Life 4555 — Active-cell flat-array sequential version
  *
  * Instead of scanning every cell in the N³ universe each generation,
- * this implementation keeps a list of living cells and uses a hash map
+ * this implementation keeps a list of living cells and uses flat arrays
  * to tally neighbour counts only for cells that *could* change state
  * (living cells and their immediate neighbours).
  *
- * Complexity per generation: O(p)  where p = number of living cells,
- * compared with O(N³) for the brute-force grid scan.
+ * Uses flat arrays for alive status and neighbour counts, eliminating
+ * all hash-table overhead.  A fused evaluate + clear pass zeros the
+ * arrays while producing the next generation, so no separate memset
+ * is needed.  Arrays are allocated once and reused across all
+ * generations.
  *
- * Algorithm (Method B, Option 2 from Bays's paper):
- *   1. For every living cell, mark it "alive" in a hash map and add +1
- *      to each of its 26 neighbours' counts.
- *   2. Walk the hash map: apply rule 4555 to every entry.
- *      - Alive  & 4 or 5 neighbours → survives
- *      - Dead   & exactly 5 neighbours → born
- *      - Otherwise → dead
- *   3. Collect survivors/births into the new living-cell list; discard
- *      the hash map.
+ * Complexity per generation: O(26p + N³)  where p = number of living
+ * cells.  The N³ term comes from the evaluation scan; for small-to-
+ * medium N this is negligible and the constant factor is far smaller
+ * than hash-table probing.
+ *
+ * Algorithm:
+ *   1. For every living cell, mark it alive in the flat array and
+ *      increment each of its 26 neighbours' counts.
+ *   2. Scan the grid: apply rule 4555, collect survivors/births,
+ *      and zero the arrays for the next generation — all in one pass.
+ *
+ * Rule 4555:
+ *   - Alive  & 4 or 5 neighbours → survives
+ *   - Dead   & exactly 5 neighbours → born
+ *   - Otherwise → dead
  */
 
 #include <stdio.h>
@@ -48,6 +57,7 @@ typedef struct {
 } CoordList;
 
 static void cl_init(CoordList *cl, int cap) {
+    if (cap < 16) cap = 16;
     cl->data     = malloc((size_t)cap * sizeof(Coord));
     cl->count    = 0;
     cl->capacity = cap;
@@ -71,85 +81,6 @@ static int coord_cmp(const void *a, const void *b) {
     if (ca->x != cb->x) return ca->x - cb->x;
     if (ca->y != cb->y) return ca->y - cb->y;
     return ca->z - cb->z;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Open-addressing hash map:  (x, y, z) → { alive, nbr_count }      */
-/*                                                                     */
-/*  Linear probing, automatic 2× resize when load ≥ 50 %.             */
-/* ------------------------------------------------------------------ */
-
-typedef struct {
-    int           x, y, z;
-    unsigned char alive;      /* 1 if the cell is alive this gen   */
-    int           nbr_count;  /* number of living neighbours       */
-    unsigned char occupied;   /* 1 if slot is in use               */
-} Entry;
-
-typedef struct {
-    Entry *buckets;
-    int    capacity;
-    int    count;
-} HashMap;
-
-static inline unsigned int hash3(int x, int y, int z) {
-    unsigned int h = (unsigned int)x * 73856093u;
-    h ^= (unsigned int)y * 19349663u;
-    h ^= (unsigned int)z * 83492791u;
-    return h;
-}
-
-static void hm_init(HashMap *hm, int cap) {
-    hm->capacity = cap < 64 ? 64 : cap;
-    hm->count    = 0;
-    hm->buckets  = calloc((size_t)hm->capacity, sizeof(Entry));
-}
-
-static void hm_free(HashMap *hm) { free(hm->buckets); }
-
-/* Low-level insert-or-find (no resize check) */
-static Entry *hm_probe(HashMap *hm, int x, int y, int z) {
-    unsigned int h = hash3(x, y, z) % (unsigned int)hm->capacity;
-    for (;;) {
-        Entry *e = &hm->buckets[h];
-        if (!e->occupied) {
-            e->x = x;  e->y = y;  e->z = z;
-            e->alive     = 0;
-            e->nbr_count = 0;
-            e->occupied  = 1;
-            hm->count++;
-            return e;
-        }
-        if (e->x == x && e->y == y && e->z == z)
-            return e;
-        h = (h + 1) % (unsigned int)hm->capacity;
-    }
-}
-
-/* Double the capacity and rehash every entry */
-static void hm_resize(HashMap *hm) {
-    int    old_cap = hm->capacity;
-    Entry *old     = hm->buckets;
-
-    hm->capacity *= 2;
-    hm->buckets   = calloc((size_t)hm->capacity, sizeof(Entry));
-    hm->count     = 0;
-
-    for (int i = 0; i < old_cap; i++) {
-        if (old[i].occupied) {
-            Entry *e     = hm_probe(hm, old[i].x, old[i].y, old[i].z);
-            e->alive     = old[i].alive;
-            e->nbr_count = old[i].nbr_count;
-        }
-    }
-    free(old);
-}
-
-/* Public lookup — automatically resizes when load factor ≥ 0.5 */
-static Entry *hm_get(HashMap *hm, int x, int y, int z) {
-    if (hm->count * 2 >= hm->capacity)
-        hm_resize(hm);
-    return hm_probe(hm, x, y, z);
 }
 
 /* ------------------------------------------------------------------ */
@@ -195,7 +126,7 @@ int main(int argc, char *argv[]) {
 
     /* --- Build initial living-cell list over the ENTIRE N³ universe --- */
     CoordList living;
-    cl_init(&living, size * size * size / 2);
+    cl_init(&living, size * size * size / 2 + 64);
 
     srand((unsigned int)seed);
     for (int i = 0; i < size; i++)
@@ -203,6 +134,13 @@ int main(int argc, char *argv[]) {
             for (int k = 0; k < size; k++)
                 if (rand() % 2)
                     cl_push(&living, i, j, k);
+
+    /* --- Allocate flat arrays (reused every generation) ----------- */
+    int total_cells = size * size * size;
+    int ss          = size * size;            /* x-stride */
+
+    char *alive_arr = calloc((size_t)total_cells, sizeof(char));
+    int  *nbr_count = calloc((size_t)total_cells, sizeof(int));
 
     /* --- Output file --- */
     FILE *file = fopen("evolution.txt", "w");
@@ -233,61 +171,53 @@ int main(int argc, char *argv[]) {
                     living.data[i].x, living.data[i].y, living.data[i].z);
         fprintf(file, "\n");
 
-        /* --- 2. Build neighbour-count hash map --------------------- */
-        /*
-         * For every living cell we:
-         *   a) mark it alive in the map, and
-         *   b) add +1 to each of its 26 neighbours' counts.
-         *
-         * After this phase, every occupied entry holds the exact number
-         * of living neighbours for that coordinate.  Dead entries whose
-         * count reaches exactly 5 may give birth.
-         */
-        int est = living.count * 60 + 128;   /* generous initial cap */
-        HashMap nbr_map;
-        hm_init(&nbr_map, est);
-
-        /* a) mark alive */
-        for (int i = 0; i < living.count; i++) {
-            Entry *e = hm_get(&nbr_map,
-                              living.data[i].x,
-                              living.data[i].y,
-                              living.data[i].z);
-            e->alive = 1;
-        }
-
-        /* b) scatter +1 to 26 neighbours */
+        /* --- 2. Mark alive + scatter neighbour counts (one pass) --- */
         for (int i = 0; i < living.count; i++) {
             int x = living.data[i].x;
             int y = living.data[i].y;
             int z = living.data[i].z;
+
+            alive_arr[x * ss + y * size + z] = 1;
+
             for (int dx = -1; dx <= 1; dx++)
-                for (int dy = -1; dy <= 1; dy++)
-                    for (int dz = -1; dz <= 1; dz++) {
-                        if (dx == 0 && dy == 0 && dz == 0) continue;
-                        int nx = wrap(x + dx, size);
-                        int ny = wrap(y + dy, size);
-                        int nz = wrap(z + dz, size);
-                        hm_get(&nbr_map, nx, ny, nz)->nbr_count++;
-                    }
+            for (int dy = -1; dy <= 1; dy++)
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dy == 0 && dz == 0) continue;
+                int nx = wrap(x + dx, size);
+                int ny = wrap(y + dy, size);
+                int nz = wrap(z + dz, size);
+                nbr_count[nx * ss + ny * size + nz]++;
+            }
         }
 
-        /* --- 3. Apply rule, collect survivors and births ----------- */
+        /* --- 3. Fused evaluate + clear -----------------------------
+         *
+         * Scan every grid cell, apply Rule 4555, collect survivors/
+         * births, and zero alive_arr + nbr_count in one pass so they
+         * are ready for the next generation (no separate memset).
+         * ----------------------------------------------------------  */
         cl_clear(&new_living);
-        for (int i = 0; i < nbr_map.capacity; i++) {
-            Entry *e = &nbr_map.buckets[i];
-            if (!e->occupied) continue;
-            if (apply_rule(e->alive, e->nbr_count))
-                cl_push(&new_living, e->x, e->y, e->z);
+        for (int x = 0; x < size; x++)
+        for (int y = 0; y < size; y++)
+        for (int z = 0; z < size; z++) {
+            int idx = x * ss + y * size + z;
+
+            int is_alive = alive_arr[idx];
+            alive_arr[idx] = 0;
+
+            int nbrs = nbr_count[idx];
+            nbr_count[idx] = 0;
+
+            if (nbrs == 0 && !is_alive) continue;
+
+            if (apply_rule(is_alive, nbrs))
+                cl_push(&new_living, x, y, z);
         }
 
         /* --- 4. Swap living lists ---------------------------------- */
         CoordList tmp = living;
         living     = new_living;
         new_living = tmp;
-        cl_clear(&new_living);
-
-        hm_free(&nbr_map);
     }
 
     double elapsed = (double)(clock() - t0) / CLOCKS_PER_SEC;
@@ -296,8 +226,9 @@ int main(int argc, char *argv[]) {
     fclose(file);
     cl_free(&living);
     cl_free(&new_living);
+    free(alive_arr);
+    free(nbr_count);
 
     printf("Simulation complete. Results saved to evolution.txt\n");
     return 0;
 }
-
