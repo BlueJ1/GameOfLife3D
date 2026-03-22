@@ -1,43 +1,8 @@
-/*
- * 3-D Game of Life 4555 — Active-cell flat-array sequential version
- *
- * Instead of scanning every cell in the N³ universe each generation,
- * this implementation keeps a list of living cells and uses flat arrays
- * to tally neighbour counts only for cells that *could* change state
- * (living cells and their immediate neighbours).
- *
- * Uses flat arrays for alive status and neighbour counts, eliminating
- * all hash-table overhead.  A fused evaluate + clear pass zeros the
- * arrays while producing the next generation, so no separate memset
- * is needed.  Arrays are allocated once and reused across all
- * generations.
- *
- * Complexity per generation: O(26p + N³)  where p = number of living
- * cells.  The N³ term comes from the evaluation scan; for small-to-
- * medium N this is negligible and the constant factor is far smaller
- * than hash-table probing.
- *
- * Algorithm:
- *   1. For every living cell, mark it alive in the flat array and
- *      increment each of its 26 neighbours' counts.
- *   2. Scan the grid: apply rule 4555, collect survivors/births,
- *      and zero the arrays for the next generation — all in one pass.
- *
- * Rule 4555:
- *   - Alive  & 4 or 5 neighbours → survives
- *   - Dead   & exactly 5 neighbours → born
- *   - Otherwise → dead
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <stdarg.h>
-
-/* ------------------------------------------------------------------ */
-/*  Dynamic string buffer for deferred file output                     */
-/* ------------------------------------------------------------------ */
 
 typedef struct {
     char  *data;
@@ -45,14 +10,14 @@ typedef struct {
     size_t cap;
 } StrBuf;
 
-static void sb_init(StrBuf *sb, size_t cap) {
+static void init_sb(StrBuf *sb, size_t cap) {
     if (cap < 4096) cap = 4096;
     sb->data = malloc(cap);
     sb->len  = 0;
     sb->cap  = cap;
 }
 
-static void sb_printf(StrBuf *sb, const char *fmt, ...) {
+static void printf_sb(StrBuf *sb, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     int needed = vsnprintf(NULL, 0, fmt, ap);
@@ -68,23 +33,15 @@ static void sb_printf(StrBuf *sb, const char *fmt, ...) {
     sb->len += (size_t)needed;
 }
 
-static void sb_free(StrBuf *sb) { free(sb->data); }
-
-/* ------------------------------------------------------------------ */
-/*  Coordinate type                                                    */
-/* ------------------------------------------------------------------ */
+static void free_sb(StrBuf *sb) { free(sb->data); }
 
 typedef struct { int x, y, z; } Coord;
 
-/* Wrap a coordinate into [0, s) for toroidal boundary conditions */
-static inline int wrap(int v, int s) {
-    int r = v % s;
-    return r < 0 ? r + s : r;
+// Wrap coordinate into [0, size) for boundary
+static inline int wrap(int v, int size) {
+    int r = v % size;
+    return r < 0 ? r + size : r;
 }
-
-/* ------------------------------------------------------------------ */
-/*  Dynamic coordinate list                                            */
-/* ------------------------------------------------------------------ */
 
 typedef struct {
     Coord *data;
@@ -110,34 +67,18 @@ static void cl_push(CoordList *cl, int x, int y, int z) {
 static void cl_clear(CoordList *cl) { cl->count = 0; }
 static void cl_free(CoordList *cl)  { free(cl->data); }
 
-/* Row-major comparison for deterministic, consistent output order */
-static int coord_cmp(const void *a, const void *b) {
-    const Coord *ca = (const Coord *)a;
-    const Coord *cb = (const Coord *)b;
-    if (ca->x != cb->x) return ca->x - cb->x;
-    if (ca->y != cb->y) return ca->y - cb->y;
-    return ca->z - cb->z;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Rule 4555                                                          */
-/* ------------------------------------------------------------------ */
-
 static inline unsigned char apply_rule(unsigned char alive, int nbrs) {
-    if (alive)
+    if (alive) {
         return (nbrs == 4 || nbrs == 5) ? 1 : 0;
-    else
+    } else {
         return (nbrs == 5) ? 1 : 0;
+    }
 }
-
-/* ------------------------------------------------------------------ */
-/*  Main                                                              */
-/* ------------------------------------------------------------------ */
 
 int main(int argc, char *argv[]) {
-    int size        = 30;   /* default grid edge length */
-    int generations = 20;   /* default generation count */
-    int seed        = 42;   /* default RNG seed         */
+    int size = 30;
+    int generations = 20;
+    int seed = 42;
 
     if (argc > 1) {
         size = atoi(argv[1]);
@@ -160,7 +101,6 @@ int main(int argc, char *argv[]) {
     printf("Initializing a %dx%dx%d universe for %d generations (Seed: %d)...\n",
            size, size, size, generations, seed);
 
-    /* --- Build initial living-cell list over the ENTIRE N³ universe --- */
     CoordList living;
     cl_init(&living, size * size * size / 2 + 64);
 
@@ -171,38 +111,27 @@ int main(int argc, char *argv[]) {
                 if (rand() % 2)
                     cl_push(&living, i, j, k);
 
-    /* --- Allocate flat arrays (reused every generation) ----------- */
-    int total_cells           = size * size * size;
-    int size_squared          = size * size;            /* x-stride */
+    int total_cells = size * size * size;
+    int size_squared = size * size;            /* x-stride */
 
     char *alive_arr = calloc((size_t)total_cells, sizeof(char));
     int  *nbr_count = calloc((size_t)total_cells, sizeof(int));
 
-    /* --- In-memory output buffer (written to file at the end) --- */
     StrBuf out_buf;
-    sb_init(&out_buf, (size_t)living.count * 30 * (size_t)generations);
+    init_sb(&out_buf, (size_t)living.count * 30 * (size_t)generations);
 
     clock_t t0 = clock();
 
     CoordList new_living;
     cl_init(&new_living, 1024);
 
-    /* ============================================================== */
-    /*  Simulation loop                                                */
-    /* ============================================================== */
-
     for (int gen = 0; gen < generations; gen++) {
-
-        /* --- 1. Buffer living cells (sorted for consistent output) -- */
-        qsort(living.data, (size_t)living.count, sizeof(Coord), coord_cmp);
-
-        sb_printf(&out_buf, "=== Generation %d ===\n", gen);
+        printf_sb(&out_buf, "=== Generation %d ===\n", gen);
         for (int i = 0; i < living.count; i++)
-            sb_printf(&out_buf, "(%d, %d, %d)\n",
+            printf_sb(&out_buf, "(%d, %d, %d)\n",
                     living.data[i].x, living.data[i].y, living.data[i].z);
-        sb_printf(&out_buf, "\n");
+        printf_sb(&out_buf, "\n");
 
-        /* --- 2. Mark alive + scatter neighbour counts (one pass) --- */
         for (int i = 0; i < living.count; i++) {
             int x = living.data[i].x;
             int y = living.data[i].y;
@@ -221,12 +150,6 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        /* --- 3. Fused evaluate + clear -----------------------------
-         *
-         * Scan every grid cell, apply Rule 4555, collect survivors/
-         * births, and zero alive_arr + nbr_count in one pass so they
-         * are ready for the next generation (no separate memset).
-         * ----------------------------------------------------------  */
         cl_clear(&new_living);
         for (int x = 0; x < size; x++)
         for (int y = 0; y < size; y++)
@@ -245,20 +168,18 @@ int main(int argc, char *argv[]) {
                 cl_push(&new_living, x, y, z);
         }
 
-        /* --- 4. Swap living lists ---------------------------------- */
         CoordList tmp = living;
-        living     = new_living;
+        living = new_living;
         new_living = tmp;
     }
 
     double elapsed = (double)(clock() - t0) / CLOCKS_PER_SEC;
     printf("Simulation time: %.4f s\n", elapsed);
 
-    /* --- Write all output to file at the very end --- */
     FILE *file = fopen("evolution.txt", "w");
     if (!file) {
         printf("Error opening file!\n");
-        sb_free(&out_buf);
+        free_sb(&out_buf);
         cl_free(&living);
         cl_free(&new_living);
         free(alive_arr);
@@ -268,7 +189,7 @@ int main(int argc, char *argv[]) {
     fwrite(out_buf.data, 1, out_buf.len, file);
     fclose(file);
 
-    sb_free(&out_buf);
+    free_sb(&out_buf);
     cl_free(&living);
     cl_free(&new_living);
     free(alive_arr);

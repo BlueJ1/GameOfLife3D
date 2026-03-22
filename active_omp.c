@@ -1,44 +1,8 @@
-/*
- * 3-D Game of Life 4555 — Active-cell flat-array OpenMP version
- *
- * Uses flat arrays for neighbour counts (per-thread private, no atomics)
- * and alive status, eliminating all hash-table overhead.  A fused
- * reduce + rule-evaluation pass produces the next generation.
- *
- * The thread team is created once and reused across all generations,
- * minimising fork/join overhead.
- *
- * Per generation:
- *   1. Sort + log living cells                              (single)
- *   2. Scatter: mark alive, increment neighbour counts      (parallel)
- *   3. Reduce + evaluate + clear: sum counts, apply rule,   (parallel)
- *      collect survivors/births, zero arrays for next gen
- *   4. Concatenate per-thread results, swap living lists     (single)
- *
- * Complexity per generation: O(26p/T + N³/T)  where p = live-cell count,
- * T = thread count.  For small-to-medium N (≤ ~200) this outperforms
- * hash-based approaches due to zero hashing overhead and perfect
- * cache-line utilisation.
- *
- * Rule 4555:  alive → alive iff nbrs ∈ {4,5};  dead → alive iff nbrs == 5.
- * Boundary: toroidal.
- *
- * Compile:
- *   gcc -O3 -fopenmp -o active_omp active_omp.c
- *
- * Usage:
- *   ./active_omp [size] [generations] [seed] [threads]
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <omp.h>
 #include <stdarg.h>
-
-/* ================================================================== */
-/*  Coordinate type + dynamic list                                     */
-/* ================================================================== */
 
 typedef struct { int x, y, z; } Coord;
 
@@ -49,7 +13,6 @@ typedef struct {
 } CoordList;
 
 static void cl_init(CoordList *cl, int cap) {
-    if (cap < 16) cap = 16;
     cl->data     = malloc((size_t)cap * sizeof(Coord));
     cl->count    = 0;
     cl->capacity = cap;
@@ -60,15 +23,12 @@ static void cl_push(CoordList *cl, int x, int y, int z) {
         cl->capacity *= 2;
         cl->data = realloc(cl->data, (size_t)cl->capacity * sizeof(Coord));
     }
-    cl->data[cl->count++] = (Coord){x, y, z};
+    cl->data[cl->count] = (Coord){x, y, z};
+    cl->count++;
 }
 
 static void cl_clear(CoordList *cl) { cl->count = 0; }
 static void cl_free(CoordList *cl)  { free(cl->data); }
-
-/* ================================================================== */
-/*  Dynamic string buffer for deferred file output                     */
-/* ================================================================== */
 
 typedef struct {
     char  *data;
@@ -76,14 +36,14 @@ typedef struct {
     size_t cap;
 } StrBuf;
 
-static void sb_init(StrBuf *sb, size_t cap) {
+static void init_sb(StrBuf *sb, size_t cap) {
     if (cap < 4096) cap = 4096;
     sb->data = malloc(cap);
     sb->len  = 0;
     sb->cap  = cap;
 }
 
-static void sb_printf(StrBuf *sb, const char *fmt, ...) {
+static void printf_sb(StrBuf *sb, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     int needed = vsnprintf(NULL, 0, fmt, ap);
@@ -99,24 +59,13 @@ static void sb_printf(StrBuf *sb, const char *fmt, ...) {
     sb->len += (size_t)needed;
 }
 
-static void sb_free(StrBuf *sb) { free(sb->data); }
+static void free_sb(StrBuf *sb) { free(sb->data); }
 
-/* Row-major comparison for deterministic output order */
-static int coord_cmp(const void *a, const void *b) {
-    const Coord *ca = (const Coord *)a;
-    const Coord *cb = (const Coord *)b;
-    if (ca->x != cb->x) return ca->x - cb->x;
-    if (ca->y != cb->y) return ca->y - cb->y;
-    return ca->z - cb->z;
-}
 
-/* ================================================================== */
-/*  Helpers                                                            */
-/* ================================================================== */
 
-static inline int wrap(int v, int s) {
-    int r = v % s;
-    return r < 0 ? r + s : r;
+static inline int wrap(int v, int size) {
+    int r = v % size;
+    return r < 0 ? r + size : r;
 }
 
 /* Rule 4555 */
@@ -129,9 +78,9 @@ static inline int apply_rule(int alive, int nbrs) {
 /* ================================================================== */
 
 int main(int argc, char *argv[]) {
-    int size        = 30;
+    int size = 30;
     int generations = 20;
-    int seed        = 42;
+    int seed = 42;
     int num_threads = 0;
 
     if (argc > 1) { size = atoi(argv[1]);
@@ -143,16 +92,9 @@ int main(int argc, char *argv[]) {
                     if (num_threads < 1) { puts("Threads must be >= 1."); return 1; }
                     omp_set_num_threads(num_threads); }
 
-    int actual_threads;
-    #pragma omp parallel
-    {
-        #pragma omp single
-        actual_threads = omp_get_num_threads();
-    }
-
     printf("Initializing a %dx%dx%d universe for %d generations "
            "(Seed: %d, Threads: %d)...\n",
-           size, size, size, generations, seed, actual_threads);
+           size, size, size, generations, seed, num_threads);
 
     /* --- Seed primordial soup over the entire N³ universe --- */
     CoordList living;
@@ -173,56 +115,41 @@ int main(int argc, char *argv[]) {
     char *alive_arr = calloc((size_t)total_cells, sizeof(char));
 
     /* Per-thread private neighbour-count arrays (no atomics needed) */
-    int **local_nbr = malloc((size_t)actual_threads * sizeof(int *));
-    for (int t = 0; t < actual_threads; t++)
+    int **local_nbr = malloc((size_t)num_threads * sizeof(int *));
+    for (int t = 0; t < num_threads; t++)
         local_nbr[t] = calloc((size_t)total_cells, sizeof(int));
 
     /* Per-thread result lists for parallel rule evaluation */
-    CoordList *thr_results = malloc((size_t)actual_threads * sizeof(CoordList));
-    for (int t = 0; t < actual_threads; t++)
+    CoordList *thr_results = malloc((size_t)num_threads * sizeof(CoordList));
+    for (int t = 0; t < num_threads; t++)
         cl_init(&thr_results[t], 1024);
 
     CoordList new_living;
     cl_init(&new_living, living.count + 64);
 
-    /* --- In-memory output buffer (written to file at the end) --- */
     StrBuf out_buf;
-    sb_init(&out_buf, (size_t)living.count * 30 * (size_t)generations);
+    init_sb(&out_buf, (size_t)living.count * 30 * (size_t)generations);
 
     double t0 = omp_get_wtime();
 
-    /* ============================================================== */
-    /*  Simulation — one persistent parallel region for all gens       */
-    /* ============================================================== */
     #pragma omp parallel
     {
         int  tid    = omp_get_thread_num();
         int *my_nbr = local_nbr[tid];
 
         for (int gen = 0; gen < generations; gen++) {
-
-            /* --- 1. Sort + buffer (single thread) ------------------ */
             #pragma omp single
             {
-                qsort(living.data, (size_t)living.count,
-                      sizeof(Coord), coord_cmp);
 
-                sb_printf(&out_buf, "=== Generation %d ===\n", gen);
+                printf_sb(&out_buf, "=== Generation %d ===\n", gen);
                 for (int i = 0; i < living.count; i++)
-                    sb_printf(&out_buf, "(%d, %d, %d)\n",
+                    printf_sb(&out_buf, "(%d, %d, %d)\n",
                             living.data[i].x,
                             living.data[i].y,
                             living.data[i].z);
-                sb_printf(&out_buf, "\n");
+                printf_sb(&out_buf, "\n");
             }
-            /* implicit barrier — sorted living visible to all */
 
-            /* --- 2. Parallel scatter ------------------------------
-             *
-             * Each thread processes its chunk of living cells.
-             *   alive_arr : no race (each coordinate is unique).
-             *   my_nbr    : thread-private array, no sharing at all.
-             * -------------------------------------------------------- */
             #pragma omp for schedule(static)
             for (int i = 0; i < living.count; i++) {
                 int x = living.data[i].x;
@@ -243,12 +170,6 @@ int main(int argc, char *argv[]) {
             }
             /* implicit barrier — all scatter complete */
 
-            /* --- 3. Fused reduce + evaluate + clear ----------------
-             *
-             * For every grid cell, sum the per-thread neighbour counts,
-             * apply Rule 4555, collect survivors/births, and zero the
-             * arrays in one pass so they are ready for the next gen.
-             * -------------------------------------------------------- */
             cl_clear(&thr_results[tid]);
 
             #pragma omp for schedule(static)
@@ -261,7 +182,7 @@ int main(int argc, char *argv[]) {
                     alive_arr[idx] = 0;
 
                     int nbrs = 0;
-                    for (int t = 0; t < actual_threads; t++) {
+                    for (int t = 0; t < num_threads; t++) {
                         nbrs += local_nbr[t][idx];
                         local_nbr[t][idx] = 0;
                     }
@@ -272,13 +193,11 @@ int main(int argc, char *argv[]) {
                         cl_push(&thr_results[tid], x, y, z);
                 }
             }
-            /* implicit barrier — all results collected, arrays cleared */
 
-            /* --- 4. Concatenate + swap (single thread) ------------ */
             #pragma omp single
             {
                 int total = 0;
-                for (int t = 0; t < actual_threads; t++)
+                for (int t = 0; t < num_threads; t++)
                     total += thr_results[t].count;
 
                 cl_clear(&new_living);
@@ -287,7 +206,7 @@ int main(int argc, char *argv[]) {
                     new_living.data = realloc(new_living.data,
                                     (size_t)new_living.capacity * sizeof(Coord));
                 }
-                for (int t = 0; t < actual_threads; t++) {
+                for (int t = 0; t < num_threads; t++) {
                     if (thr_results[t].count > 0) {
                         memcpy(&new_living.data[new_living.count],
                                thr_results[t].data,
@@ -299,27 +218,22 @@ int main(int argc, char *argv[]) {
                 CoordList tmp = living;
                 living     = new_living;
                 new_living = tmp;
-
-                //if (gen % 5 == 0 || gen == generations - 1)
-                //    printf("  gen %4d : %d live cells\n", gen, living.count);
             }
-            /* implicit barrier — new living visible to all */
         }
     }
 
     double elapsed = omp_get_wtime() - t0;
     printf("Simulation time: %.4f s\n", elapsed);
 
-    /* --- Write all output to file at the very end --- */
     FILE *file = fopen("evolution.txt", "w");
     if (!file) { puts("Error opening file!"); return 1; }
     fwrite(out_buf.data, 1, out_buf.len, file);
     fclose(file);
 
-    sb_free(&out_buf);
+    free_sb(&out_buf);
     cl_free(&living);
     cl_free(&new_living);
-    for (int t = 0; t < actual_threads; t++) {
+    for (int t = 0; t < num_threads; t++) {
         cl_free(&thr_results[t]);
         free(local_nbr[t]);
     }

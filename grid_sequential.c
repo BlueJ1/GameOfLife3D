@@ -4,24 +4,21 @@
 #include <time.h>
 #include <stdarg.h>
 
-/* ------------------------------------------------------------------ */
-/*  Dynamic string buffer for deferred file output                     */
-/* ------------------------------------------------------------------ */
-
+// String buffer for outputting evolutionary history
 typedef struct {
     char  *data;
     size_t len;
     size_t cap;
 } StrBuf;
 
-static void sb_init(StrBuf *sb, size_t cap) {
+static void init_sb(StrBuf *sb, size_t cap) {
     if (cap < 4096) cap = 4096;
     sb->data = malloc(cap);
     sb->len  = 0;
     sb->cap  = cap;
 }
 
-static void sb_printf(StrBuf *sb, const char *fmt, ...) {
+static void printf_sb(StrBuf *sb, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     int needed = vsnprintf(NULL, 0, fmt, ap);
@@ -37,26 +34,22 @@ static void sb_printf(StrBuf *sb, const char *fmt, ...) {
     sb->len += (size_t)needed;
 }
 
-static void sb_free(StrBuf *sb) { free(sb->data); }
+static void free_sb(StrBuf *sb) { free(sb->data); }
 
-/* ------------------------------------------------------------------ */
-/*  Helpers                                                            */
-/* ------------------------------------------------------------------ */
-
-/* 3-D → 1-D index (row-major: x varies slowest, z fastest) */
-static inline int idx(int x, int y, int z, int ssq, int s) {
-    return x * ssq + y * s + z;
+// 3-D → 1-D index
+static inline int idx(int x, int y, int z, int size_squared, int size) {
+    return x * size_squared + y * size + z;
 }
 
-/* Count 26 neighbours – INTERIOR cell (no coordinate wraps needed) */
+// Count neighbours in interior
 static inline int count_interior(const unsigned char *restrict g,
                                  int x, int y, int z,
-                                 int ssq, int s) {
+                                 int size_squared, int size) {
     int c = 0;
     for (int dx = -1; dx <= 1; dx++) {
-        int bx = (x + dx) * ssq;
+        int bx = (x + dx) * size_squared;
         for (int dy = -1; dy <= 1; dy++) {
-            int bxy = bx + (y + dy) * s;
+            int bxy = bx + (y + dy) * size;
             for (int dz = -1; dz <= 1; dz++) {
                 if (dx == 0 && dy == 0 && dz == 0) continue;
                 c += g[bxy + (z + dz)];
@@ -66,13 +59,13 @@ static inline int count_interior(const unsigned char *restrict g,
     return c;
 }
 
-/* Count 26 neighbours – BOUNDARY cell (toroidal / wrapping) */
+// Count neighbours on boundary
 static inline int count_boundary(const unsigned char *restrict g,
                                  int x, int y, int z,
-                                 int ssq, int s) {
+                                 int size_squared, int s) {
     int c = 0;
     for (int dx = -1; dx <= 1; dx++) {
-        int bx = ((x + dx + s) % s) * ssq;
+        int bx = ((x + dx + s) % s) * size_squared;
         for (int dy = -1; dy <= 1; dy++) {
             int bxy = bx + ((y + dy + s) % s) * s;
             for (int dz = -1; dz <= 1; dz++) {
@@ -84,7 +77,7 @@ static inline int count_boundary(const unsigned char *restrict g,
     return c;
 }
 
-/* Rule 4555: survive on 4 or 5 neighbours, birth on exactly 5 */
+// apply rule 4555 (survive on 4 or 5 neighbours, birth on 5)
 static inline unsigned char apply_rule(unsigned char alive, int nbrs) {
     if (alive)
         return (nbrs == 4 || nbrs == 5) ? 1 : 0;
@@ -92,16 +85,13 @@ static inline unsigned char apply_rule(unsigned char alive, int nbrs) {
         return (nbrs == 5) ? 1 : 0;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Main                                                               */
-/* ------------------------------------------------------------------ */
 
 int main(int argc, char *argv[]) {
-    int size        = 30;   /* default grid size        */
-    int generations = 20;   /* default generation count */
-    int seed        = 42;   /* default RNG seed         */
+    int size = 30;
+    int generations = 20;
+    int seed = 42;
 
-    /* Parse CLI arguments: size generations seed */
+    // CLI arguments: size generations seed
     if (argc > 1) {
         size = atoi(argv[1]);
         if (size < 5) {
@@ -123,24 +113,18 @@ int main(int argc, char *argv[]) {
     printf("Initializing a %dx%dx%d universe for %d generations (Seed: %d)...\n",
            size, size, size, generations, seed);
 
-    const int total_cells  = size * size * size;
+    const int total_cells = size * size * size;
     const int size_squared = size * size;   /* precomputed size^2 */
 
-    /*
-     * Allocate grids as unsigned char (1 byte per cell) instead of int
-     * (4 bytes).  For a 100³ grid this is 1 MB vs. 4 MB — a big win for
-     * cache-line utilisation.
-     */
-    unsigned char *grid      = calloc(total_cells, 1);
+    unsigned char *grid = calloc(total_cells, 1);
     unsigned char *next_grid = calloc(total_cells, 1);
     if (!grid || !next_grid) {
-        printf("Memory allocation failed! Grid size might be too large.\n");
+        printf("Memory allocation failed. Grid size might be too large.\n");
         return 1;
     }
 
-    /* --- In-memory output buffer (written to file at the end) --- */
     StrBuf out_buf;
-    sb_init(&out_buf, (size_t)total_cells * 15 * (size_t)generations);
+    init_sb(&out_buf, (size_t)total_cells * 15 * (size_t)generations);
 
     /* Seed the "primordial soup" over the entire N³ universe */
     srand((unsigned int)seed);
@@ -151,27 +135,16 @@ int main(int argc, char *argv[]) {
 
     clock_t t0 = clock();
 
-    /* ============================================================== */
-    /*  Simulation loop                                                */
-    /* ============================================================== */
     for (int gen = 0; gen < generations; gen++) {
-
-        /* --- 1. Buffer living cells -------------------------------- */
-        sb_printf(&out_buf, "=== Generation %d ===\n", gen);
+        printf_sb(&out_buf, "=== Generation %d ===\n", gen);
         for (int i = 0; i < total_cells; i++) {
             if (grid[i]) {
                 int x = i / size_squared;
                 int r = i % size_squared;
-                sb_printf(&out_buf, "(%d, %d, %d)\n", x, r / size, r % size);
+                printf_sb(&out_buf, "(%d, %d, %d)\n", x, r / size, r % size);
             }
         }
 
-        /* --- 2. Evolve -------------------------------------------- */
-        /*
-         * Interior cells (all coords strictly inside [1 .. size-2]) use
-         * the fast, modulo-free neighbour count; boundary cells fall back
-         * to the wrapping version.
-         */
         for (int i = 0; i < total_cells; i++) {
             int x = i / size_squared;
             int r = i % size_squared;
@@ -189,23 +162,21 @@ int main(int argc, char *argv[]) {
             next_grid[i] = apply_rule(grid[i], nbrs);
         }
 
-        /* --- 3. Pointer swap (O(1)) + clear next buffer ------------ */
         unsigned char *tmp = grid;
-        grid      = next_grid;
+        grid = next_grid;
         next_grid = tmp;
-        memset(next_grid, 0, (size_t)total_cells);  /* fast library memset */
+        memset(next_grid, 0, (size_t)total_cells);
 
-        sb_printf(&out_buf, "\n");
+        printf_sb(&out_buf, "\n");
     }
 
     double elapsed = (double)(clock() - t0) / CLOCKS_PER_SEC;
     printf("Simulation time: %.4f s\n", elapsed);
 
-    /* --- Write all output to file at the very end --- */
     FILE *file = fopen("evolution.txt", "w");
     if (!file) {
         printf("Error opening file!\n");
-        sb_free(&out_buf);
+        free_sb(&out_buf);
         free(grid);
         free(next_grid);
         return 1;
@@ -213,7 +184,7 @@ int main(int argc, char *argv[]) {
     fwrite(out_buf.data, 1, out_buf.len, file);
     fclose(file);
 
-    sb_free(&out_buf);
+    free_sb(&out_buf);
     free(grid);
     free(next_grid);
 

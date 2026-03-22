@@ -1,43 +1,24 @@
-/*
- * 3-D Game of Life – OpenMP-parallelised version (optimised)
- *
- * Key optimisations over the naïve parallel version:
- *   1. unsigned char grid (1 B/cell) instead of int (4 B/cell)  → 4× less
- *      memory, much better cache utilisation for large grids.
- *   2. Interior / boundary split – the expensive modulo wrapping is only
- *      used for the thin shell of boundary cells; interior cells use plain
- *      addition.
- *   3. Pointer swap instead of a full-array copy each generation.
- *   4. static inline helpers so the compiler can inline and optimise the
- *      hot neighbour-counting path.
- *   5. Larger stdio buffer (1 MiB) to reduce write-syscall overhead.
- *   6. Wall-clock timing with omp_get_wtime() for easy benchmarking.
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <omp.h>
 #include <stdarg.h>
 
-/* ------------------------------------------------------------------ */
-/*  Dynamic string buffer for deferred file output                     */
-/* ------------------------------------------------------------------ */
-
+// String buffer for outputting evolutionary history
 typedef struct {
     char  *data;
     size_t len;
     size_t cap;
 } StrBuf;
 
-static void sb_init(StrBuf *sb, size_t cap) {
+static void init_sb(StrBuf *sb, size_t cap) {
     if (cap < 4096) cap = 4096;
     sb->data = malloc(cap);
     sb->len  = 0;
     sb->cap  = cap;
 }
 
-static void sb_printf(StrBuf *sb, const char *fmt, ...) {
+static void printf_sb(StrBuf *sb, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     int needed = vsnprintf(NULL, 0, fmt, ap);
@@ -53,26 +34,22 @@ static void sb_printf(StrBuf *sb, const char *fmt, ...) {
     sb->len += (size_t)needed;
 }
 
-static void sb_free(StrBuf *sb) { free(sb->data); }
+static void free_sb(StrBuf *sb) { free(sb->data); }
 
-/* ------------------------------------------------------------------ */
-/*  Helpers                                                            */
-/* ------------------------------------------------------------------ */
-
-/* 3-D → 1-D index (row-major: x varies slowest, z fastest) */
-static inline int idx(int x, int y, int z, int ssq, int s) {
-    return x * ssq + y * s + z;
+// 3-D → 1-D index
+static inline int idx(int x, int y, int z, int size_squared, int size) {
+    return x * size_squared + y * size + z;
 }
 
-/* Count 26 neighbours – INTERIOR cell (no coordinate wraps) */
+// Count neighbours in interior
 static inline int count_interior(const unsigned char *restrict g,
                                  int x, int y, int z,
-                                 int ssq, int s) {
+                                 int size_squared, int size) {
     int c = 0;
     for (int dx = -1; dx <= 1; dx++) {
-        int bx = (x + dx) * ssq;
+        int bx = (x + dx) * size_squared;
         for (int dy = -1; dy <= 1; dy++) {
-            int bxy = bx + (y + dy) * s;
+            int bxy = bx + (y + dy) * size;
             for (int dz = -1; dz <= 1; dz++) {
                 if (dx == 0 && dy == 0 && dz == 0) continue;
                 c += g[bxy + (z + dz)];
@@ -82,13 +59,13 @@ static inline int count_interior(const unsigned char *restrict g,
     return c;
 }
 
-/* Count 26 neighbours – BOUNDARY cell (toroidal / wrapping) */
+// Count neighbours on boundary
 static inline int count_boundary(const unsigned char *restrict g,
                                  int x, int y, int z,
-                                 int ssq, int s) {
+                                 int size_squared, int s) {
     int c = 0;
     for (int dx = -1; dx <= 1; dx++) {
-        int bx = ((x + dx + s) % s) * ssq;
+        int bx = ((x + dx + s) % s) * size_squared;
         for (int dy = -1; dy <= 1; dy++) {
             int bxy = bx + ((y + dy + s) % s) * s;
             for (int dz = -1; dz <= 1; dz++) {
@@ -108,17 +85,14 @@ static inline unsigned char apply_rule(unsigned char alive, int nbrs) {
         return (nbrs == 5) ? 1 : 0;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Main                                                               */
-/* ------------------------------------------------------------------ */
 
 int main(int argc, char *argv[]) {
-    int size        = 30;   /* default grid size        */
-    int generations = 20;   /* default generation count  */
-    int seed        = 42;   /* default RNG seed          */
-    int num_threads = 0;    /* 0 = let OpenMP decide     */
+    int size = 30;
+    int generations = 20;
+    int seed = 42;
+    int num_threads = 0;
 
-    /* Parse CLI arguments: size generations seed threads */
+    // CLI arguments: size generations seed threads
     if (argc > 1) {
         size = atoi(argv[1]);
         if (size < 5) { puts("Size too small. Please use a size of at least 5."); return 1; }
@@ -136,16 +110,8 @@ int main(int argc, char *argv[]) {
         omp_set_num_threads(num_threads);
     }
 
-    /* Report actual thread count (query inside a parallel region) */
-    int actual_threads;
-    #pragma omp parallel
-    {
-        #pragma omp single
-        actual_threads = omp_get_num_threads();
-    }
-
     printf("Initializing a %dx%dx%d universe for %d generations (Seed: %d, Threads: %d)...\n",
-           size, size, size, generations, seed, actual_threads);
+           size, size, size, generations, seed, num_threads);
 
     const int total_size = size * size * size;
     const int size_squared   = size * size;              /* precomputed size^2 */
@@ -161,7 +127,7 @@ int main(int argc, char *argv[]) {
 
     /* --- In-memory output buffer (written to file at the end) --- */
     StrBuf out_buf;
-    sb_init(&out_buf, (size_t)total_size * 15 * (size_t)generations);
+    init_sb(&out_buf, (size_t)total_size * 15 * (size_t)generations);
 
     /* Seed the "primordial soup" over the entire N³ universe */
     srand((unsigned int)seed);
@@ -178,23 +144,15 @@ int main(int argc, char *argv[]) {
     for (int gen = 0; gen < generations; gen++) {
 
         /* --- 1. Buffer living cells (file order must be deterministic) --- */
-        sb_printf(&out_buf, "=== Generation %d ===\n", gen);
+        printf_sb(&out_buf, "=== Generation %d ===\n", gen);
         for (int i = 0; i < total_size; i++) {
             if (grid[i]) {
                 int x = i / size_squared;
                 int r = i % size_squared;
-                sb_printf(&out_buf, "(%d, %d, %d)\n", x, r / size, r % size);
+                printf_sb(&out_buf, "(%d, %d, %d)\n", x, r / size, r % size);
             }
         }
 
-        /* --- 2. Parallel computation -------------------------------- */
-        /*
-         * One flat loop over every cell.  Interior cells (all coords
-         * strictly inside [1 .. size-2]) use the fast, modulo-free
-         * neighbour count; boundary cells fall back to the wrapping
-         * version.  Branch prediction handles the split efficiently
-         * since the vast majority of cells are interior.
-         */
         #pragma omp parallel for schedule(static)
         for (int i = 0; i < total_size; i++) {
             int x = i / size_squared;
@@ -213,25 +171,29 @@ int main(int argc, char *argv[]) {
             next_grid[i] = apply_rule(grid[i], nbrs);
         }
 
-        /* --- 3. Pointer swap (O(1)) + clear next buffer ------------- */
         unsigned char *tmp = grid;
         grid      = next_grid;
         next_grid = tmp;
-        memset(next_grid, 0, (size_t)total_size);    /* fast library memset */
+        memset(next_grid, 0, (size_t)total_size);
 
-        sb_printf(&out_buf, "\n");
+        printf_sb(&out_buf, "\n");
     }
 
     double t1 = omp_get_wtime();
     printf("Simulation time: %.4f s\n", t1 - t0);
 
-    /* --- Write all output to file at the very end --- */
     FILE *file = fopen("evolution.txt", "w");
-    if (!file) { puts("Error opening file!"); free(grid); free(next_grid); sb_free(&out_buf); return 1; }
+    if (!file) {
+        puts("Error opening file!");
+        free(grid);
+        free(next_grid);
+        free_sb(&out_buf);
+        return 1;
+    }
     fwrite(out_buf.data, 1, out_buf.len, file);
     fclose(file);
 
-    sb_free(&out_buf);
+    free_sb(&out_buf);
     free(grid);
     free(next_grid);
 

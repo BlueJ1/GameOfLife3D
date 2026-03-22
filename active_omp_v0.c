@@ -56,14 +56,14 @@ typedef struct {
     size_t cap;
 } StrBuf;
 
-static void sb_init(StrBuf *sb, size_t cap) {
+static void init_sb(StrBuf *sb, size_t cap) {
     if (cap < 4096) cap = 4096;
     sb->data = malloc(cap);
     sb->len  = 0;
     sb->cap  = cap;
 }
 
-static void sb_printf(StrBuf *sb, const char *fmt, ...) {
+static void printf_sb(StrBuf *sb, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     int needed = vsnprintf(NULL, 0, fmt, ap);
@@ -79,7 +79,7 @@ static void sb_printf(StrBuf *sb, const char *fmt, ...) {
     sb->len += (size_t)needed;
 }
 
-static void sb_free(StrBuf *sb) { free(sb->data); }
+static void free_sb(StrBuf *sb) { free(sb->data); }
 
 /* ================================================================== */
 /*  Packed cell key                                                     */
@@ -244,14 +244,7 @@ static void buf_push(Buf *b, uint64_t v) {
     b->data[b->len++] = v;
 }
 
-/* ================================================================== */
-/*  Comparator for qsort – defined at file scope for Clang compat.    */
-/* ================================================================== */
 
-static int cmp64(const void *a, const void *b) {
-    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
-    return (x > y) - (x < y);
-}
 
 /* ================================================================== */
 /*  Main                                                               */
@@ -301,7 +294,7 @@ int main(int argc, char *argv[]) {
 
     /* --- In-memory output buffer (written to file at the end) --- */
     StrBuf out_buf;
-    sb_init(&out_buf, alive->count * 30 * (size_t)generations);
+    init_sb(&out_buf, alive->count * 30 * (size_t)generations);
 
     /* Scratch arrays (reused each generation) */
     Buf       cands      = {0};
@@ -317,8 +310,8 @@ int main(int argc, char *argv[]) {
     /* ============================================================== */
     for (int gen = 0; gen < generations; gen++) {
 
-        /* --- 1. Buffer live cells (sorted for deterministic output) --- */
-        sb_printf(&out_buf, "=== Generation %d ===\n", gen);
+        /* --- 1. Buffer live cells --------------------------------- */
+        printf_sb(&out_buf, "=== Generation %d ===\n", gen);
 
         if (alive->count > snap_cap) {
             snap_cap = alive->count * 2 + 64;
@@ -326,15 +319,12 @@ int main(int argc, char *argv[]) {
         }
         size_t n_alive = ks_snapshot(alive, snap);
 
-        /* sort keys for deterministic output order */
-        qsort(snap, n_alive, sizeof(uint64_t), cmp64);
-
         for (size_t i = 0; i < n_alive; i++) {
             int cx, cy, cz;
             cell_unpack(snap[i], &cx, &cy, &cz);
-            sb_printf(&out_buf, "(%d, %d, %d)\n", cx, cy, cz);
+            printf_sb(&out_buf, "(%d, %d, %d)\n", cx, cy, cz);
         }
-        sb_printf(&out_buf, "\n");
+        printf_sb(&out_buf, "\n");
 
         /* --- 2. Collect candidates --------------------------------
          *
@@ -402,7 +392,7 @@ int main(int argc, char *argv[]) {
     fwrite(out_buf.data, 1, out_buf.len, file);
     fclose(file);
 
-    sb_free(&out_buf);
+    free_sb(&out_buf);
     ks_free(alive);
     nt_free(nbr);
     free(cands.data);
