@@ -17,10 +17,10 @@ SIZES=(50 100 200)
 GENERATIONS=(20 50)
 
 # Thread counts to test for OpenMP parallel versions
-THREADS=(1 2 4 8 16)
+THREADS=(1 2 3 4 6 8 12 16 24 32 48 64)
 
 # 5 distinct seeds for statistical averaging
-SEEDS=(42 123 999 4567 8888)
+SEEDS=(42 123 999)
 
 # Output file
 OUTPUT_CSV="benchmarks_comprehensive.csv"
