@@ -1,6 +1,42 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <omp.h> // Include OpenMP header
+#include <stdarg.h>
+
+/* ------------------------------------------------------------------ */
+/*  Dynamic string buffer for deferred file output                     */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    char  *data;
+    size_t len;
+    size_t cap;
+} StrBuf;
+
+static void sb_init(StrBuf *sb, size_t cap) {
+    if (cap < 4096) cap = 4096;
+    sb->data = malloc(cap);
+    sb->len  = 0;
+    sb->cap  = cap;
+}
+
+static void sb_printf(StrBuf *sb, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int needed = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (needed < 0) return;
+    while (sb->len + (size_t)needed + 1 > sb->cap) {
+        sb->cap *= 2;
+        sb->data = realloc(sb->data, sb->cap);
+    }
+    va_start(ap, fmt);
+    vsnprintf(sb->data + sb->len, (size_t)needed + 1, fmt, ap);
+    va_end(ap);
+    sb->len += (size_t)needed;
+}
+
+static void sb_free(StrBuf *sb) { free(sb->data); }
 
 // Function to get the 1D index from 3D coordinates
 int get_index(int x, int y, int z, int size) {
@@ -67,13 +103,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    FILE *file = fopen("evolution.txt", "w");
-    if (file == NULL) {
-        printf("Error opening file!\n");
-        free(grid);
-        free(next_grid);
-        return 1;
-    }
+    /* --- In-memory output buffer (written to file at the end) --- */
+    StrBuf out_buf;
+    sb_init(&out_buf, (size_t)total_cells * 15 * (size_t)generations);
 
     // Initialize a random "primordial soup" over the entire N³ universe
     srand((unsigned int)seed);
@@ -87,16 +119,16 @@ int main(int argc, char *argv[]) {
 
     // Run the simulation
     for (int gen = 0; gen < generations; gen++) {
-        fprintf(file, "=== Generation %d ===\n", gen);
+        sb_printf(&out_buf, "=== Generation %d ===\n", gen);
 
         // 1. Sequential Logging Phase
-        // Keep file I/O sequential to prevent race conditions and jumbled text
+        // Buffer output to write at the end
         for (int x = 0; x < size; x++) {
             for (int y = 0; y < size; y++) {
                 for (int z = 0; z < size; z++) {
                     int current_idx = get_index(x, y, z, size);
                     if (grid[current_idx] == 1) {
-                        fprintf(file, "(%d, %d, %d)\n", x, y, z);
+                        sb_printf(&out_buf, "(%d, %d, %d)\n", x, y, z);
                     }
                 }
             }
@@ -135,10 +167,22 @@ int main(int argc, char *argv[]) {
             next_grid[i] = 0; // Reset next_grid for the next generation
         }
 
-        fprintf(file, "\n");
+        sb_printf(&out_buf, "\n");
     }
 
+    // Write all output to file at the very end
+    FILE *file = fopen("evolution.txt", "w");
+    if (file == NULL) {
+        printf("Error opening file!\n");
+        sb_free(&out_buf);
+        free(grid);
+        free(next_grid);
+        return 1;
+    }
+    fwrite(out_buf.data, 1, out_buf.len, file);
     fclose(file);
+
+    sb_free(&out_buf);
 
     // Free the dynamically allocated memory
     free(grid);

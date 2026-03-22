@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Configuration
-EXE="./ao"
+EXE="./go"
 SIZE=200
 GENS=20
 SEED=42

@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -O3 -Wall
+CFLAGS = -O3 -Wall -ffast-math -march=native
 LDLIBS = -lm
 LIBOMP_PREFIX = $(shell brew --prefix libomp)
 OMPFLAGS = -Xpreprocessor -fopenmp -I$(LIBOMP_PREFIX)/include -L$(LIBOMP_PREFIX)/lib -lomp

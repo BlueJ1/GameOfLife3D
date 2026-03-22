@@ -33,6 +33,42 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <stdarg.h>
+
+/* ------------------------------------------------------------------ */
+/*  Dynamic string buffer for deferred file output                     */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    char  *data;
+    size_t len;
+    size_t cap;
+} StrBuf;
+
+static void sb_init(StrBuf *sb, size_t cap) {
+    if (cap < 4096) cap = 4096;
+    sb->data = malloc(cap);
+    sb->len  = 0;
+    sb->cap  = cap;
+}
+
+static void sb_printf(StrBuf *sb, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int needed = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (needed < 0) return;
+    while (sb->len + (size_t)needed + 1 > sb->cap) {
+        sb->cap *= 2;
+        sb->data = realloc(sb->data, sb->cap);
+    }
+    va_start(ap, fmt);
+    vsnprintf(sb->data + sb->len, (size_t)needed + 1, fmt, ap);
+    va_end(ap);
+    sb->len += (size_t)needed;
+}
+
+static void sb_free(StrBuf *sb) { free(sb->data); }
 
 /* ------------------------------------------------------------------ */
 /*  Coordinate type                                                    */
@@ -95,7 +131,7 @@ static inline unsigned char apply_rule(unsigned char alive, int nbrs) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Main                                                               */
+/*  Main                                                              */
 /* ------------------------------------------------------------------ */
 
 int main(int argc, char *argv[]) {
@@ -136,20 +172,15 @@ int main(int argc, char *argv[]) {
                     cl_push(&living, i, j, k);
 
     /* --- Allocate flat arrays (reused every generation) ----------- */
-    int total_cells = size * size * size;
-    int ss          = size * size;            /* x-stride */
+    int total_cells           = size * size * size;
+    int size_squared          = size * size;            /* x-stride */
 
     char *alive_arr = calloc((size_t)total_cells, sizeof(char));
     int  *nbr_count = calloc((size_t)total_cells, sizeof(int));
 
-    /* --- Output file --- */
-    FILE *file = fopen("evolution.txt", "w");
-    if (!file) {
-        printf("Error opening file!\n");
-        cl_free(&living);
-        return 1;
-    }
-    setvbuf(file, NULL, _IOFBF, 1 << 20);   /* 1 MiB write buffer */
+    /* --- In-memory output buffer (written to file at the end) --- */
+    StrBuf out_buf;
+    sb_init(&out_buf, (size_t)living.count * 30 * (size_t)generations);
 
     clock_t t0 = clock();
 
@@ -162,14 +193,14 @@ int main(int argc, char *argv[]) {
 
     for (int gen = 0; gen < generations; gen++) {
 
-        /* --- 1. Log living cells (sorted for consistent output) ---- */
+        /* --- 1. Buffer living cells (sorted for consistent output) -- */
         qsort(living.data, (size_t)living.count, sizeof(Coord), coord_cmp);
 
-        fprintf(file, "=== Generation %d ===\n", gen);
+        sb_printf(&out_buf, "=== Generation %d ===\n", gen);
         for (int i = 0; i < living.count; i++)
-            fprintf(file, "(%d, %d, %d)\n",
+            sb_printf(&out_buf, "(%d, %d, %d)\n",
                     living.data[i].x, living.data[i].y, living.data[i].z);
-        fprintf(file, "\n");
+        sb_printf(&out_buf, "\n");
 
         /* --- 2. Mark alive + scatter neighbour counts (one pass) --- */
         for (int i = 0; i < living.count; i++) {
@@ -177,7 +208,7 @@ int main(int argc, char *argv[]) {
             int y = living.data[i].y;
             int z = living.data[i].z;
 
-            alive_arr[x * ss + y * size + z] = 1;
+            alive_arr[x * size_squared + y * size + z] = 1;
 
             for (int dx = -1; dx <= 1; dx++)
             for (int dy = -1; dy <= 1; dy++)
@@ -186,7 +217,7 @@ int main(int argc, char *argv[]) {
                 int nx = wrap(x + dx, size);
                 int ny = wrap(y + dy, size);
                 int nz = wrap(z + dz, size);
-                nbr_count[nx * ss + ny * size + nz]++;
+                nbr_count[nx * size_squared + ny * size + nz]++;
             }
         }
 
@@ -200,7 +231,7 @@ int main(int argc, char *argv[]) {
         for (int x = 0; x < size; x++)
         for (int y = 0; y < size; y++)
         for (int z = 0; z < size; z++) {
-            int idx = x * ss + y * size + z;
+            int idx = x * size_squared + y * size + z;
 
             int is_alive = alive_arr[idx];
             alive_arr[idx] = 0;
@@ -223,7 +254,21 @@ int main(int argc, char *argv[]) {
     double elapsed = (double)(clock() - t0) / CLOCKS_PER_SEC;
     printf("Simulation time: %.4f s\n", elapsed);
 
+    /* --- Write all output to file at the very end --- */
+    FILE *file = fopen("evolution.txt", "w");
+    if (!file) {
+        printf("Error opening file!\n");
+        sb_free(&out_buf);
+        cl_free(&living);
+        cl_free(&new_living);
+        free(alive_arr);
+        free(nbr_count);
+        return 1;
+    }
+    fwrite(out_buf.data, 1, out_buf.len, file);
     fclose(file);
+
+    sb_free(&out_buf);
     cl_free(&living);
     cl_free(&new_living);
     free(alive_arr);

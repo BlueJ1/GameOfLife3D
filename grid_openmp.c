@@ -18,6 +18,42 @@
 #include <stdlib.h>
 #include <string.h>
 #include <omp.h>
+#include <stdarg.h>
+
+/* ------------------------------------------------------------------ */
+/*  Dynamic string buffer for deferred file output                     */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    char  *data;
+    size_t len;
+    size_t cap;
+} StrBuf;
+
+static void sb_init(StrBuf *sb, size_t cap) {
+    if (cap < 4096) cap = 4096;
+    sb->data = malloc(cap);
+    sb->len  = 0;
+    sb->cap  = cap;
+}
+
+static void sb_printf(StrBuf *sb, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int needed = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (needed < 0) return;
+    while (sb->len + (size_t)needed + 1 > sb->cap) {
+        sb->cap *= 2;
+        sb->data = realloc(sb->data, sb->cap);
+    }
+    va_start(ap, fmt);
+    vsnprintf(sb->data + sb->len, (size_t)needed + 1, fmt, ap);
+    va_end(ap);
+    sb->len += (size_t)needed;
+}
+
+static void sb_free(StrBuf *sb) { free(sb->data); }
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -123,10 +159,9 @@ int main(int argc, char *argv[]) {
     unsigned char *next_grid = calloc(total_size, 1);
     if (!grid || !next_grid) { puts("Memory allocation failed!"); return 1; }
 
-    /* Open output file with a large buffer to cut down on write syscalls */
-    FILE *file = fopen("evolution.txt", "w");
-    if (!file) { puts("Error opening file!"); free(grid); free(next_grid); return 1; }
-    setvbuf(file, NULL, _IOFBF, 1 << 20);      /* 1 MiB write buffer */
+    /* --- In-memory output buffer (written to file at the end) --- */
+    StrBuf out_buf;
+    sb_init(&out_buf, (size_t)total_size * 15 * (size_t)generations);
 
     /* Seed the "primordial soup" over the entire N³ universe */
     srand((unsigned int)seed);
@@ -142,13 +177,13 @@ int main(int argc, char *argv[]) {
     /* ============================================================== */
     for (int gen = 0; gen < generations; gen++) {
 
-        /* --- 1. Sequential logging (file order must be deterministic) --- */
-        fprintf(file, "=== Generation %d ===\n", gen);
+        /* --- 1. Buffer living cells (file order must be deterministic) --- */
+        sb_printf(&out_buf, "=== Generation %d ===\n", gen);
         for (int i = 0; i < total_size; i++) {
             if (grid[i]) {
                 int x = i / size_squared;
                 int r = i % size_squared;
-                fprintf(file, "(%d, %d, %d)\n", x, r / size, r % size);
+                sb_printf(&out_buf, "(%d, %d, %d)\n", x, r / size, r % size);
             }
         }
 
@@ -184,13 +219,19 @@ int main(int argc, char *argv[]) {
         next_grid = tmp;
         memset(next_grid, 0, (size_t)total_size);    /* fast library memset */
 
-        fprintf(file, "\n");
+        sb_printf(&out_buf, "\n");
     }
 
     double t1 = omp_get_wtime();
     printf("Simulation time: %.4f s\n", t1 - t0);
 
+    /* --- Write all output to file at the very end --- */
+    FILE *file = fopen("evolution.txt", "w");
+    if (!file) { puts("Error opening file!"); free(grid); free(next_grid); sb_free(&out_buf); return 1; }
+    fwrite(out_buf.data, 1, out_buf.len, file);
     fclose(file);
+
+    sb_free(&out_buf);
     free(grid);
     free(next_grid);
 
