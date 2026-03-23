@@ -1,11 +1,11 @@
+# plot_benchmarks.py
+# created with the help of Generative AI
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import os
 
-# =============================================================================
-# 1. Load and Prepare the Data
-# =============================================================================
 CSV_FILE = 'benchmarks_comprehensive.csv'
 
 if not os.path.exists(CSV_FILE):
@@ -34,9 +34,6 @@ colors = {'go': '#1f77b4',
           'gs': '#2ca02c',
           'as': '#d62728'}
 
-# =============================================================================
-# Plot 1: Real vs. Ideal Speedup (Strong Scaling)
-# =============================================================================
 def plot_speedup():
     plt.figure(figsize=(10, 6))
 
@@ -75,9 +72,6 @@ def plot_speedup():
     plt.savefig('plot_1_speedup.png', dpi=300)
     print("Saved plot_1_speedup.png")
 
-# =============================================================================
-# Plot 2: Algorithmic Comparison (Dense vs. Sparse over Grid Size)
-# =============================================================================
 def plot_algorithmic_crossover():
     plt.figure(figsize=(10, 6))
 
@@ -105,9 +99,6 @@ def plot_algorithmic_crossover():
     plt.savefig('plot_2_algo_crossover.png', dpi=300)
     print("Saved plot_2_algo_crossover.png")
 
-# =============================================================================
-# Plot 3: OpenMP Runtime Comparison
-# =============================================================================
 def plot_optimization_impact():
     plt.figure(figsize=(10, 6))
 
@@ -135,9 +126,6 @@ def plot_optimization_impact():
     plt.savefig('plot_3_optimizations.png', dpi=300)
     print("Saved plot_3_optimizations.png")
 
-# =============================================================================
-# Execute
-# =============================================================================
 plot_speedup()
 plot_algorithmic_crossover()
 plot_optimization_impact()

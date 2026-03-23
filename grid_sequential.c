@@ -1,3 +1,5 @@
+// grid_sequential.c
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -126,7 +128,7 @@ int main(int argc, char *argv[]) {
     StrBuf out_buf;
     init_sb(&out_buf, (size_t)total_cells * 15 * (size_t)generations);
 
-    /* Seed the "primordial soup" over the entire N³ universe */
+    // Seed the "primordial soup" over the entire universe
     srand((unsigned int)seed);
     for (int i = 0; i < size; i++)
         for (int j = 0; j < size; j++)

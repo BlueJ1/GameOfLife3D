@@ -1,3 +1,5 @@
+// active_omp.c
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -96,7 +98,6 @@ int main(int argc, char *argv[]) {
            "(Seed: %d, Threads: %d)...\n",
            size, size, size, generations, seed, num_threads);
 
-    /* --- Seed primordial soup over the entire N³ universe --- */
     CoordList living;
     cl_init(&living, size * size * size / 2 + 64);
 
@@ -108,18 +109,16 @@ int main(int argc, char *argv[]) {
 
     printf("Initial live cells: %d\n", living.count);
 
-    /* --- Allocate flat arrays (reused every generation) ----------- */
     int total_cells = size * size * size;
-    int ss          = size * size;            /* x-stride */
+    int ss = size * size;
 
     char *alive_arr = calloc((size_t)total_cells, sizeof(char));
 
-    /* Per-thread private neighbour-count arrays (no atomics needed) */
     int **local_nbr = malloc((size_t)num_threads * sizeof(int *));
     for (int t = 0; t < num_threads; t++)
         local_nbr[t] = calloc((size_t)total_cells, sizeof(int));
 
-    /* Per-thread result lists for parallel rule evaluation */
+    // Per-thread result lists for parallel rule evaluation
     CoordList *thr_results = malloc((size_t)num_threads * sizeof(CoordList));
     for (int t = 0; t < num_threads; t++)
         cl_init(&thr_results[t], 1024);
@@ -168,7 +167,6 @@ int main(int argc, char *argv[]) {
                     my_nbr[nx * ss + ny * size + nz]++;
                 }
             }
-            /* implicit barrier — all scatter complete */
 
             cl_clear(&thr_results[tid]);
 

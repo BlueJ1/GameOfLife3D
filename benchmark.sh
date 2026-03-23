@@ -1,14 +1,11 @@
 #!/bin/bash
-
-# ==============================================================================
-# Configuration Section
-# ==============================================================================
+# benchmark.sh
+# Created with the help of Generative AI
 
 # List of executables to benchmark
 # gs = grid_sequential, as = active_sequential
-# go = grid_openmp, go2 = grid_openmp_v0
-# ao = active_omp, ao2 = active_omp_v0
-EXECUTABLES=("gs" "as" "go" "go2" "ao" "ao2")
+# go = grid_openmp, ao = active_omp
+EXECUTABLES=("gs" "as" "go" "ao")
 
 # Grid sizes (N x N x N)
 SIZES=(50 100 200)
@@ -24,8 +21,6 @@ SEEDS=(42 123 999)
 
 # Output file
 OUTPUT_CSV="benchmarks_comprehensive.csv"
-
-# ==============================================================================
 
 # 1. Verification and Setup
 echo "Checking for executables..."
